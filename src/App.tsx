@@ -227,17 +227,23 @@ export default function App() {
   // Delete Member Handler
   const handleConfirmDelete = async () => {
     if (!memberToDelete) return;
+    const idToDelete = memberToDelete.id;
+    const name = memberToDelete.fullName;
+
+    // 1. Immediately remove from local UI state
+    setMembers((prev) => prev.filter((m) => m.id !== idToDelete));
+    setIsDeleteModalOpen(false);
+    setMemberToDelete(null);
+    if (selectedMember?.id === idToDelete) {
+      setIsDetailModalOpen(false);
+      setSelectedMember(null);
+    }
+
     setIsDeleting(true);
     try {
-      const name = memberToDelete.fullName;
-      await removeMember(memberToDelete.id);
-      setIsDeleteModalOpen(false);
-      setMemberToDelete(null);
-      if (selectedMember?.id === memberToDelete.id) {
-        setIsDetailModalOpen(false);
-        setSelectedMember(null);
-      }
-      showCloudToast(`Removed member "${name}" from Cloud Firestore.`);
+      // 2. Permanently remove from Firestore and LocalStorage
+      await removeMember(idToDelete);
+      showCloudToast(`Permanently deleted "${name}".`);
     } catch (err) {
       console.error('Delete failed:', err);
     } finally {

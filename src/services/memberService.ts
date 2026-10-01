@@ -4,7 +4,6 @@ import {
   setDoc,
   deleteDoc,
   onSnapshot,
-  getDocs,
   getDoc,
   Unsubscribe
 } from 'firebase/firestore';
@@ -14,6 +13,8 @@ import { INITIAL_MEMBERS } from '../data/mockMembers';
 
 const LOCAL_STORAGE_KEY = 'dm_fitness_members_inr_v2';
 const LOCAL_STORAGE_PLANS_KEY = 'dm_fitness_plans_inr_v2';
+const LOCAL_STORAGE_INIT_KEY = 'dm_fitness_system_initialized_v2';
+const LOCAL_STORAGE_DELETED_IDS_KEY = 'dm_fitness_deleted_ids_v2';
 
 export const DEFAULT_MEMBERSHIP_PLANS: MembershipPlan[] = [
   {
@@ -54,6 +55,47 @@ export const DEFAULT_MEMBERSHIP_PLANS: MembershipPlan[] = [
   },
 ];
 
+// Helper: Get set of permanently deleted member IDs
+export function getDeletedMemberIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_DELETED_IDS_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch {
+    return new Set();
+  }
+}
+
+// Helper: Record a member ID as permanently deleted
+export function recordDeletedMemberId(id: string): void {
+  try {
+    const ids = getDeletedMemberIds();
+    ids.add(id);
+    localStorage.setItem(LOCAL_STORAGE_DELETED_IDS_KEY, JSON.stringify(Array.from(ids)));
+  } catch (err) {
+    console.error('Failed saving deleted ID tombstone:', err);
+  }
+}
+
+// Check if system has completed its one-time initial seed
+export function isSystemInitialized(): boolean {
+  try {
+    return localStorage.getItem(LOCAL_STORAGE_INIT_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+// Mark system as initialized permanently
+export function markSystemInitialized(): void {
+  try {
+    localStorage.setItem(LOCAL_STORAGE_INIT_KEY, 'true');
+  } catch (err) {
+    console.error('Failed setting init key:', err);
+  }
+}
+
 // Read membership plans from local cache
 export function getMembershipPlans(): MembershipPlan[] {
   try {
@@ -75,14 +117,12 @@ export function getMembershipPlans(): MembershipPlan[] {
 
 // Save membership plans directly to Firestore and local cache
 export async function saveMembershipPlans(plans: MembershipPlan[]): Promise<void> {
-  // Update local cache immediately
   try {
     localStorage.setItem(LOCAL_STORAGE_PLANS_KEY, JSON.stringify(plans));
   } catch (err) {
     console.error('Failed saving plans to localStorage:', err);
   }
 
-  // Push directly to Firestore cloud database
   const docPath = 'settings/membership_plans';
   try {
     const docRef = doc(db, 'settings', 'membership_plans');
@@ -121,7 +161,7 @@ export function subscribeToFirestorePlans(
         }
       }
 
-      // If settings document doesn't exist yet, seed initial default plans to Firestore
+      // If settings document doesn't exist yet, seed initial default plans
       try {
         await setDoc(docRef, {
           plans: DEFAULT_MEMBERSHIP_PLANS,
@@ -152,7 +192,6 @@ export function getPlanPrice(planName: string, plans: MembershipPlan[]): number 
   const match = plans.find((p) => p.name.toLowerCase() === planName.toLowerCase());
   if (match) return match.price;
 
-  // Fallback defaults in INR
   if (planName === '1 Month') return 1500;
   if (planName === '3 Months') return 4000;
   if (planName === '6 Months') return 7000;
@@ -187,7 +226,6 @@ export function calculateExpiryDate(
     return date.toISOString().split('T')[0];
   }
 
-  // Fallback parsing if plan not found in list
   const name = typeof planNameOrPlan === 'string' ? planNameOrPlan : '';
   if (name.includes('1 Year') || name.includes('12 Month')) {
     date.setFullYear(date.getFullYear() + 1);
@@ -247,29 +285,43 @@ export function getDaysRemaining(expiryDateStr: string): { days: number; isExpir
   };
 }
 
-// Read from local cache with status recalculation
+// Read from local cache with status recalculation and deleted ID filtering
 export function getLocalMembers(): Member[] {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (!raw) {
+    const initialized = isSystemInitialized();
+
+    // If never initialized at all, bootstrap initial records once
+    if (raw === null && !initialized) {
+      markSystemInitialized();
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(INITIAL_MEMBERS));
       return INITIAL_MEMBERS.map((m) => ({
         ...m,
         status: computeMemberStatus(m.expiryDate),
       }));
     }
+
+    if (!raw) {
+      return [];
+    }
+
     const parsed: Member[] = JSON.parse(raw);
-    return parsed.map((m) => ({
-      ...m,
-      status: computeMemberStatus(m.expiryDate),
-    }));
+    if (!Array.isArray(parsed)) return [];
+
+    const deletedIds = getDeletedMemberIds();
+    return parsed
+      .filter((m) => !deletedIds.has(m.id))
+      .map((m) => ({
+        ...m,
+        status: computeMemberStatus(m.expiryDate),
+      }));
   } catch (err) {
     console.error('Failed reading members from localStorage:', err);
-    return INITIAL_MEMBERS;
+    return [];
   }
 }
 
-// Save to local cache
+// Save to local cache (saves empty array properly when all members are deleted)
 export function saveLocalMembers(members: Member[]) {
   try {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(members));
@@ -289,10 +341,33 @@ export function subscribeToFirestoreMembers(
   return onSnapshot(
     membersRef,
     async (snapshot) => {
-      // If collection is empty on first boot, auto-seed with INITIAL_MEMBERS
-      if (snapshot.empty) {
-        console.log('Firestore members collection is empty. Bootstrapping initial records...');
+      const deletedIds = getDeletedMemberIds();
+
+      // Check if Firestore was ever initialized
+      let isCloudInitialized = isSystemInitialized();
+      if (!isCloudInitialized) {
         try {
+          const sysSnap = await getDoc(doc(db, 'settings', 'system'));
+          if (sysSnap.exists()) {
+            isCloudInitialized = true;
+            markSystemInitialized();
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      // If completely empty AND never initialized anywhere, perform the one-time initial seed
+      if (snapshot.empty && !isCloudInitialized) {
+        console.log('Performing one-time initial seed for new database...');
+        markSystemInitialized();
+        try {
+          // Mark system initialized in Firestore so it NEVER seeds again even if 0 members
+          await setDoc(doc(db, 'settings', 'system'), {
+            isInitialized: true,
+            initializedAt: new Date().toISOString(),
+          });
+
           const promises = INITIAL_MEMBERS.map((m) => {
             const docRef = doc(db, 'members', m.id);
             return setDoc(docRef, {
@@ -305,24 +380,37 @@ export function subscribeToFirestoreMembers(
         } catch (seedErr) {
           console.warn('Initial member seed error:', seedErr);
         }
+        saveLocalMembers(INITIAL_MEMBERS);
         onData(INITIAL_MEMBERS);
         return;
       }
 
+      // If empty and already initialized: This is intentional (0 members)! Do NOT reload default data.
+      if (snapshot.empty) {
+        saveLocalMembers([]);
+        onData([]);
+        return;
+      }
+
+      // Process live snapshot documents
       const list: Member[] = [];
       snapshot.forEach((docSnap) => {
+        const id = docSnap.id;
+        // Never include documents that were permanently deleted
+        if (deletedIds.has(id)) {
+          return;
+        }
+
         const data = docSnap.data() as Member;
         list.push({
           ...data,
-          id: docSnap.id,
+          id,
           status: computeMemberStatus(data.expiryDate),
         });
       });
 
-      // Update local storage cache
-      if (list.length > 0) {
-        saveLocalMembers(list);
-      }
+      // ALWAYS sync to localStorage (even if 0 items)
+      saveLocalMembers(list);
       onData(list);
     },
     (error) => {
@@ -347,6 +435,17 @@ export async function persistMember(member: Member): Promise<void> {
     createdBy: member.createdBy || auth.currentUser?.uid || 'admin',
   };
 
+  // If this ID was previously marked deleted, unmark it
+  try {
+    const deletedIds = getDeletedMemberIds();
+    if (deletedIds.has(member.id)) {
+      deletedIds.delete(member.id);
+      localStorage.setItem(LOCAL_STORAGE_DELETED_IDS_KEY, JSON.stringify(Array.from(deletedIds)));
+    }
+  } catch (e) {
+    console.error('Error updating deleted IDs:', e);
+  }
+
   // Immediate optimistic update to local cache
   const localList = getLocalMembers();
   const index = localList.findIndex((m) => m.id === member.id);
@@ -370,14 +469,20 @@ export async function persistMember(member: Member): Promise<void> {
   }
 }
 
-// Delete member directly from Firestore cloud database
+// Delete member permanently from Firestore, LocalStorage, and local state
 export async function removeMember(memberId: string): Promise<void> {
-  // Immediate optimistic update to local cache
+  // 1. Permanently record ID as deleted (tombstone)
+  recordDeletedMemberId(memberId);
+
+  // 2. Remove immediately from local storage cache
   const localList = getLocalMembers();
   const updated = localList.filter((m) => m.id !== memberId);
   saveLocalMembers(updated);
 
-  // Directly delete from Firestore
+  // 3. Mark system as initialized so it never re-seeds if all are deleted
+  markSystemInitialized();
+
+  // 4. Directly delete document from Firestore cloud database
   const docPath = `members/${memberId}`;
   try {
     const docRef = doc(db, 'members', memberId);
