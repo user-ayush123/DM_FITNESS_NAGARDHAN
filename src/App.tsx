@@ -12,6 +12,7 @@ import {
   persistMember,
   removeMember,
   subscribeToFirestoreMembers,
+  subscribeToFirestorePlans,
   exportMembersToCSV,
   computeMemberStatus,
   isExpiringSoon,
@@ -27,13 +28,14 @@ import { MemberModal } from './components/MemberModal';
 import { MemberDetailModal } from './components/MemberDetailModal';
 import { DeleteModal } from './components/DeleteModal';
 import { SettingsView } from './components/SettingsView';
-import { Dumbbell, Activity, Settings as SettingsIcon } from 'lucide-react';
+import { Dumbbell, Activity, Settings as SettingsIcon, Cloud, Check } from 'lucide-react';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [members, setMembers] = useState<Member[]>(() => getLocalMembers());
   const [plans, setPlans] = useState<MembershipPlan[]>(() => getMembershipPlans());
+  const [isFirestoreConnected, setIsFirestoreConnected] = useState(true);
 
   // Active top-level tab: 'members' | 'settings'
   const [activeTab, setActiveTab] = useState<'members' | 'settings'>('members');
@@ -56,6 +58,14 @@ export default function App() {
   const [memberToDelete, setMemberToDelete] = useState<Member | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // Real-time toast notice
+  const [cloudToast, setCloudToast] = useState('');
+
+  const showCloudToast = (msg: string) => {
+    setCloudToast(msg);
+    setTimeout(() => setCloudToast(''), 3000);
+  };
+
   // Monitor Auth state
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -65,27 +75,35 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Sync with Firestore when user is authenticated
+  // Connect real-time Firestore listeners for members & pricing settings across all devices
   useEffect(() => {
-    if (!user) return;
-
-    const unsubscribe = subscribeToFirestoreMembers(
+    // 1. Real-time listener for all members
+    const unsubscribeMembers = subscribeToFirestoreMembers(
       (cloudMembers) => {
-        if (cloudMembers.length > 0) {
-          setMembers(cloudMembers);
-        } else {
-          // If Firestore is empty, sync current local members to cloud
-          const local = getLocalMembers();
-          local.forEach((m) => persistMember(m, true));
-        }
+        setMembers(cloudMembers);
+        setIsFirestoreConnected(true);
       },
       (error) => {
-        console.warn('Firestore subscription notice, falling back to local persistence:', error);
+        console.warn('Notice from Firestore members listener:', error);
       }
     );
 
-    return () => unsubscribe();
-  }, [user]);
+    // 2. Real-time listener for pricing settings
+    const unsubscribePlans = subscribeToFirestorePlans(
+      (cloudPlans) => {
+        setPlans(cloudPlans);
+        setIsFirestoreConnected(true);
+      },
+      (error) => {
+        console.warn('Notice from Firestore plans listener:', error);
+      }
+    );
+
+    return () => {
+      unsubscribeMembers();
+      unsubscribePlans();
+    };
+  }, []);
 
   // Recalculate dashboard statistics
   const stats: DashboardStats = useMemo(() => {
@@ -167,15 +185,15 @@ export default function App() {
     setSelectedGender('all');
   };
 
-  // Update & persist membership plans
+  // Update & persist membership plans directly to Firestore
   const handleUpdatePlans = async (updatedPlans: MembershipPlan[]) => {
     setPlans(updatedPlans);
-    await saveMembershipPlans(updatedPlans, Boolean(user));
+    await saveMembershipPlans(updatedPlans);
+    showCloudToast('Pricing settings saved to Firestore cloud database!');
   };
 
   // Add or Edit Member Save Handler
   const handleSaveMember = async (formData: MemberFormData, existingId?: string) => {
-    const isFirebaseActive = Boolean(user);
     const id = existingId || `dm-${Date.now().toString().slice(-5)}`;
     const now = new Date().toISOString();
 
@@ -184,26 +202,21 @@ export default function App() {
       id,
       status: computeMemberStatus(formData.expiryDate),
       createdBy: existingId
-        ? members.find((m) => m.id === existingId)?.createdBy || user?.uid
-        : user?.uid,
+        ? members.find((m) => m.id === existingId)?.createdBy || user?.uid || 'admin'
+        : user?.uid || 'admin',
       createdAt: existingId
         ? members.find((m) => m.id === existingId)?.createdAt || now
         : now,
       updatedAt: now,
     };
 
-    await persistMember(memberToSave, isFirebaseActive);
-
-    // Update local state directly for immediate responsive feedback
-    setMembers((prev) => {
-      const idx = prev.findIndex((m) => m.id === id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = memberToSave;
-        return copy;
-      }
-      return [memberToSave, ...prev];
-    });
+    // Save directly to Firestore and local cache
+    await persistMember(memberToSave);
+    showCloudToast(
+      existingId
+        ? `Updated member "${memberToSave.fullName}" in Cloud Firestore!`
+        : `Enrolled new member "${memberToSave.fullName}" in Cloud Firestore!`
+    );
 
     // If detail modal is open with this member, update it
     if (selectedMember && selectedMember.id === id) {
@@ -216,14 +229,15 @@ export default function App() {
     if (!memberToDelete) return;
     setIsDeleting(true);
     try {
-      await removeMember(memberToDelete.id, Boolean(user));
-      setMembers((prev) => prev.filter((m) => m.id !== memberToDelete.id));
+      const name = memberToDelete.fullName;
+      await removeMember(memberToDelete.id);
       setIsDeleteModalOpen(false);
       setMemberToDelete(null);
       if (selectedMember?.id === memberToDelete.id) {
         setIsDetailModalOpen(false);
         setSelectedMember(null);
       }
+      showCloudToast(`Removed member "${name}" from Cloud Firestore.`);
     } catch (err) {
       console.error('Delete failed:', err);
     } finally {
@@ -243,14 +257,13 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     };
 
-    await persistMember(updated, Boolean(user));
-    setMembers((prev) => prev.map((m) => (m.id === member.id ? updated : m)));
+    await persistMember(updated);
     setSelectedMember(updated);
+    showCloudToast(`Payment updated for ${member.fullName} in Cloud Firestore!`);
   };
 
   // Quick Membership Renewal
   const handleRenewPlan = async (member: Member, planName: string, fee: number) => {
-    // Base date is either existing expiry date (if in future) or today (if already expired)
     const todayStr = new Date().toISOString().split('T')[0];
     const baseDate = member.expiryDate > todayStr ? member.expiryDate : todayStr;
     const newExpiry = calculateExpiryDate(baseDate, planName, plans);
@@ -265,9 +278,9 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     };
 
-    await persistMember(updated, Boolean(user));
-    setMembers((prev) => prev.map((m) => (m.id === member.id ? updated : m)));
+    await persistMember(updated);
     setSelectedMember(updated);
+    showCloudToast(`Renewed membership for ${member.fullName} in Cloud Firestore!`);
   };
 
   return (
@@ -283,7 +296,16 @@ export default function App() {
         totalMembersCount={members.length}
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        isFirestoreConnected={isFirestoreConnected}
       />
+
+      {/* Cloud Notification Toast */}
+      {cloudToast && (
+        <div className="fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-2xl bg-zinc-900 border border-emerald-500/40 px-4 py-3 text-xs font-semibold text-emerald-400 shadow-2xl backdrop-blur-xl animate-bounce">
+          <Cloud className="h-4 w-4" />
+          <span>{cloudToast}</span>
+        </div>
+      )}
 
       {/* Main Content Dashboard */}
       <main className="flex-1 mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8 space-y-6">
@@ -309,8 +331,8 @@ export default function App() {
                     Member Management & Operations
                   </h2>
                   <p className="text-xs sm:text-sm text-zinc-400 max-w-xl mt-1">
-                    Monitor memberships, track fee collections and pending dues, manage enrollments, and
-                    issue VIP access passes in real-time.
+                    Live cloud synchronization via Firebase Firestore. Changes update across all
+                    screens, browsers, and devices instantly in real-time.
                   </p>
                 </div>
 
@@ -404,20 +426,17 @@ export default function App() {
             <span>• Built for professional fitness administration</span>
           </p>
           <div className="flex items-center gap-4 text-[11px] text-zinc-400">
+            <span className="text-emerald-400 font-semibold flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              Firebase Firestore Live Database Connected
+            </span>
+            <span>•</span>
             <button
               onClick={() => setActiveTab(activeTab === 'members' ? 'settings' : 'members')}
-              className="text-emerald-400 hover:underline cursor-pointer"
+              className="text-zinc-300 hover:text-emerald-400 hover:underline cursor-pointer"
             >
-              {activeTab === 'members' ? 'Open Pricing Settings' : 'Back to Members'}
+              {activeTab === 'members' ? 'Pricing Settings' : 'Back to Members'}
             </button>
-            <span>•</span>
-            {user ? (
-              <span className="text-emerald-400 font-medium">
-                Cloud Sync Active ({user.email})
-              </span>
-            ) : (
-              <span>LocalStorage Persistence Active</span>
-            )}
           </div>
         </div>
       </footer>

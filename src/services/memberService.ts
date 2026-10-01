@@ -4,6 +4,8 @@ import {
   setDoc,
   deleteDoc,
   onSnapshot,
+  getDocs,
+  getDoc,
   Unsubscribe
 } from 'firebase/firestore';
 import { db, auth, handleFirestoreError, OperationType } from '../firebase';
@@ -52,7 +54,7 @@ export const DEFAULT_MEMBERSHIP_PLANS: MembershipPlan[] = [
   },
 ];
 
-// Read membership plans from localStorage
+// Read membership plans from local cache
 export function getMembershipPlans(): MembershipPlan[] {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_PLANS_KEY);
@@ -71,27 +73,78 @@ export function getMembershipPlans(): MembershipPlan[] {
   }
 }
 
-// Save membership plans to localStorage and optional Firestore
-export async function saveMembershipPlans(plans: MembershipPlan[], isFirebaseActive: boolean = false): Promise<void> {
+// Save membership plans directly to Firestore and local cache
+export async function saveMembershipPlans(plans: MembershipPlan[]): Promise<void> {
+  // Update local cache immediately
   try {
     localStorage.setItem(LOCAL_STORAGE_PLANS_KEY, JSON.stringify(plans));
   } catch (err) {
     console.error('Failed saving plans to localStorage:', err);
   }
 
-  // Also sync to Firestore if user is authenticated
-  if (isFirebaseActive && auth.currentUser) {
-    try {
-      const docRef = doc(db, 'settings', 'membership_plans');
-      await setDoc(docRef, {
-        plans,
-        updatedAt: new Date().toISOString(),
-        updatedBy: auth.currentUser.uid,
-      });
-    } catch (err) {
-      console.warn('Could not sync plans to Firestore settings:', err);
-    }
+  // Push directly to Firestore cloud database
+  const docPath = 'settings/membership_plans';
+  try {
+    const docRef = doc(db, 'settings', 'membership_plans');
+    await setDoc(docRef, {
+      plans,
+      updatedAt: new Date().toISOString(),
+      updatedBy: auth.currentUser?.uid || 'admin',
+    });
+  } catch (err) {
+    console.error('Error saving plans to Firestore:', err);
+    handleFirestoreError(err, OperationType.WRITE, docPath);
   }
+}
+
+// Subscribe to real-time Firestore pricing settings
+export function subscribeToFirestorePlans(
+  onData: (plans: MembershipPlan[]) => void,
+  onError?: (err: unknown) => void
+): Unsubscribe {
+  const docPath = 'settings/membership_plans';
+  const docRef = doc(db, 'settings', 'membership_plans');
+
+  return onSnapshot(
+    docRef,
+    async (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        if (data && Array.isArray(data.plans) && data.plans.length > 0) {
+          try {
+            localStorage.setItem(LOCAL_STORAGE_PLANS_KEY, JSON.stringify(data.plans));
+          } catch (e) {
+            console.error('Error writing cached plans:', e);
+          }
+          onData(data.plans);
+          return;
+        }
+      }
+
+      // If settings document doesn't exist yet, seed initial default plans to Firestore
+      try {
+        await setDoc(docRef, {
+          plans: DEFAULT_MEMBERSHIP_PLANS,
+          updatedAt: new Date().toISOString(),
+          updatedBy: 'initial_setup',
+        });
+        onData(DEFAULT_MEMBERSHIP_PLANS);
+      } catch (err) {
+        console.warn('Initial settings seed notice:', err);
+        onData(getMembershipPlans());
+      }
+    },
+    (error) => {
+      console.error('Firestore Plans Subscription Error:', error);
+      if (onError) {
+        try {
+          handleFirestoreError(error, OperationType.GET, docPath);
+        } catch (e) {
+          onError(e);
+        }
+      }
+    }
+  );
 }
 
 // Find price for a plan
@@ -194,7 +247,7 @@ export function getDaysRemaining(expiryDateStr: string): { days: number; isExpir
   };
 }
 
-// Read from localStorage with status recalculation
+// Read from local cache with status recalculation
 export function getLocalMembers(): Member[] {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -216,7 +269,7 @@ export function getLocalMembers(): Member[] {
   }
 }
 
-// Save to localStorage
+// Save to local cache
 export function saveLocalMembers(members: Member[]) {
   try {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(members));
@@ -225,17 +278,37 @@ export function saveLocalMembers(members: Member[]) {
   }
 }
 
-// Sync Firestore collection with Firestore Error Handling
+// Real-time Firestore members collection listener
 export function subscribeToFirestoreMembers(
   onData: (members: Member[]) => void,
-  onError: (err: unknown) => void
+  onError?: (err: unknown) => void
 ): Unsubscribe {
   const collectionPath = 'members';
   const membersRef = collection(db, collectionPath);
 
   return onSnapshot(
     membersRef,
-    (snapshot) => {
+    async (snapshot) => {
+      // If collection is empty on first boot, auto-seed with INITIAL_MEMBERS
+      if (snapshot.empty) {
+        console.log('Firestore members collection is empty. Bootstrapping initial records...');
+        try {
+          const promises = INITIAL_MEMBERS.map((m) => {
+            const docRef = doc(db, 'members', m.id);
+            return setDoc(docRef, {
+              ...m,
+              status: computeMemberStatus(m.expiryDate),
+              createdBy: 'initial_setup',
+            });
+          });
+          await Promise.all(promises);
+        } catch (seedErr) {
+          console.warn('Initial member seed error:', seedErr);
+        }
+        onData(INITIAL_MEMBERS);
+        return;
+      }
+
       const list: Member[] = [];
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as Member;
@@ -245,6 +318,7 @@ export function subscribeToFirestoreMembers(
           status: computeMemberStatus(data.expiryDate),
         });
       });
+
       // Update local storage cache
       if (list.length > 0) {
         saveLocalMembers(list);
@@ -252,24 +326,28 @@ export function subscribeToFirestoreMembers(
       onData(list);
     },
     (error) => {
-      try {
-        handleFirestoreError(error, OperationType.LIST, collectionPath);
-      } catch (e) {
-        onError(e);
+      console.error('Firestore Members Listener Error:', error);
+      if (onError) {
+        try {
+          handleFirestoreError(error, OperationType.LIST, collectionPath);
+        } catch (e) {
+          onError(e);
+        }
       }
     }
   );
 }
 
-// Add or update a member in both Firestore and localStorage
-export async function persistMember(member: Member, isFirebaseActive: boolean): Promise<void> {
+// Add or update a member directly in Firestore cloud database
+export async function persistMember(member: Member): Promise<void> {
   const updatedMember: Member = {
     ...member,
     status: computeMemberStatus(member.expiryDate),
     updatedAt: new Date().toISOString(),
+    createdBy: member.createdBy || auth.currentUser?.uid || 'admin',
   };
 
-  // Always update local cache
+  // Immediate optimistic update to local cache
   const localList = getLocalMembers();
   const index = localList.findIndex((m) => m.id === member.id);
   let updatedList: Member[];
@@ -281,37 +359,32 @@ export async function persistMember(member: Member, isFirebaseActive: boolean): 
   }
   saveLocalMembers(updatedList);
 
-  // If signed in to Firebase, push to cloud
-  if (isFirebaseActive && auth.currentUser) {
-    const docPath = `members/${member.id}`;
-    try {
-      const docRef = doc(db, 'members', member.id);
-      await setDoc(docRef, {
-        ...updatedMember,
-        createdBy: member.createdBy || auth.currentUser.uid,
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, docPath);
-    }
+  // Directly persist to Firestore
+  const docPath = `members/${member.id}`;
+  try {
+    const docRef = doc(db, 'members', member.id);
+    await setDoc(docRef, updatedMember);
+  } catch (err) {
+    console.error('Error persisting member to Firestore:', err);
+    handleFirestoreError(err, OperationType.WRITE, docPath);
   }
 }
 
-// Delete member from both Firestore and localStorage
-export async function removeMember(memberId: string, isFirebaseActive: boolean): Promise<void> {
-  // Update local storage
+// Delete member directly from Firestore cloud database
+export async function removeMember(memberId: string): Promise<void> {
+  // Immediate optimistic update to local cache
   const localList = getLocalMembers();
   const updated = localList.filter((m) => m.id !== memberId);
   saveLocalMembers(updated);
 
-  // If signed in, delete from Firestore
-  if (isFirebaseActive && auth.currentUser) {
-    const docPath = `members/${memberId}`;
-    try {
-      const docRef = doc(db, 'members', memberId);
-      await deleteDoc(docRef);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, docPath);
-    }
+  // Directly delete from Firestore
+  const docPath = `members/${memberId}`;
+  try {
+    const docRef = doc(db, 'members', memberId);
+    await deleteDoc(docRef);
+  } catch (err) {
+    console.error('Error deleting member from Firestore:', err);
+    handleFirestoreError(err, OperationType.DELETE, docPath);
   }
 }
 

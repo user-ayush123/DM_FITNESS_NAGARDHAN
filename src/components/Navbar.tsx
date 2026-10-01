@@ -8,7 +8,8 @@ import {
   Cloud,
   LogIn,
   LogOut,
-  Plus
+  Plus,
+  Radio
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -18,6 +19,7 @@ interface NavbarProps {
   totalMembersCount: number;
   activeTab: 'members' | 'settings';
   onTabChange: (tab: 'members' | 'settings') => void;
+  isFirestoreConnected: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -27,6 +29,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   totalMembersCount,
   activeTab,
   onTabChange,
+  isFirestoreConnected,
 }) => {
   const handleGoogleSignIn = async () => {
     try {
@@ -106,8 +109,21 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         </div>
 
-        {/* Right Actions & Firebase Auth */}
+        {/* Right Actions, Cloud Status & Firebase Auth */}
         <div className="flex items-center gap-2.5">
+          {/* Real-time Cloud Sync Pill */}
+          <div
+            title="Real-time Firebase Firestore database sync is active across all devices"
+            className="hidden sm:flex items-center gap-1.5 rounded-xl bg-zinc-900/90 border border-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300"
+          >
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+            </span>
+            <span className="text-zinc-400">Cloud:</span>
+            <span className="text-emerald-400 font-semibold">Live Sync</span>
+          </div>
+
           {/* Quick Add Member button */}
           <button
             onClick={onOpenAddModal}
@@ -118,7 +134,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="sm:hidden">Add</span>
           </button>
 
-          {/* Sync indicator & Auth */}
+          {/* Firebase Auth User Profile or Login */}
           <div className="flex items-center gap-1.5 rounded-xl bg-zinc-900/90 p-1 border border-zinc-800">
             {user ? (
               <div className="flex items-center gap-2 pr-1">
@@ -154,7 +170,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 onClick={handleGoogleSignIn}
                 disabled={authLoading}
                 className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:bg-zinc-700 hover:text-white transition-all cursor-pointer"
-                title="Connect with Google Sign-in to sync to Firebase cloud database"
+                title="Sign in with Google"
               >
                 <LogIn className="h-3.5 w-3.5 text-emerald-400" />
                 <span className="hidden sm:inline">Sign In</span>

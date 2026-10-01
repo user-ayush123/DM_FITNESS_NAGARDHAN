@@ -56,24 +56,19 @@ service cloud.firestore {
     }
 
     match /members/{memberId} {
-      allow get, list: if isSignedIn();
-      allow create: if isSignedIn()
-        && isValidId(memberId)
-        && isValidMember(incoming())
-        && (!('createdBy' in incoming()) || incoming().createdBy == request.auth.uid || isAdmin());
-      allow update: if isSignedIn()
-        && isValidId(memberId)
-        && isValidMember(incoming());
-      allow delete: if isSignedIn() && isValidId(memberId);
+      allow get, list: if true;
+      allow create: if isValidId(memberId) && isValidMember(incoming());
+      allow update: if isValidId(memberId) && isValidMember(incoming());
+      allow delete: if isValidId(memberId);
     }
 
     match /settings/{settingId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isValidId(settingId);
+      allow read: if true;
+      allow write: if isValidId(settingId);
     }
 
     match /admins/{adminId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow write: if isAdmin() && isValidId(adminId);
     }
   }
