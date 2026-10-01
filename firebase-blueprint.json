@@ -1,0 +1,182 @@
+{
+  "entities": {
+    "Member": {
+      "title": "Gym Member",
+      "description": "Represents an enrolled member of DM FITNESS gym.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the member document.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Full name of the gym member.",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "email": {
+          "type": "string",
+          "description": "Contact email address of the member.",
+          "maxLength": 120
+        },
+        "phone": {
+          "type": "string",
+          "description": "Primary phone number for contact.",
+          "minLength": 5,
+          "maxLength": 25
+        },
+        "address": {
+          "type": "string",
+          "description": "Full residential address of the member.",
+          "minLength": 2,
+          "maxLength": 250
+        },
+        "dateOfBirth": {
+          "type": "string",
+          "description": "Date of birth in YYYY-MM-DD format.",
+          "maxLength": 15
+        },
+        "gender": {
+          "type": "string",
+          "description": "Gender identity of the member.",
+          "enum": ["Male", "Female", "Other", "Prefer not to say"]
+        },
+        "membershipType": {
+          "type": "string",
+          "description": "Duration tier of the membership (e.g. 1 Month, 3 Months, or custom duration).",
+          "maxLength": 100
+        },
+        "totalFee": {
+          "type": "number",
+          "description": "Total charge amount for this membership tier."
+        },
+        "paidAmount": {
+          "type": "number",
+          "description": "Total amount paid toward the membership fee."
+        },
+        "balanceDue": {
+          "type": "number",
+          "description": "Remaining unpaid balance owed by the member."
+        },
+        "joiningDate": {
+          "type": "string",
+          "description": "Date when member joined in YYYY-MM-DD format.",
+          "maxLength": 15
+        },
+        "expiryDate": {
+          "type": "string",
+          "description": "Date when membership expires in YYYY-MM-DD format.",
+          "maxLength": 15
+        },
+        "status": {
+          "type": "string",
+          "description": "Computed status of membership validity.",
+          "enum": ["active", "expired"]
+        },
+        "emergencyContact": {
+          "type": "string",
+          "description": "Emergency contact name and phone.",
+          "maxLength": 120
+        },
+        "notes": {
+          "type": "string",
+          "description": "Staff or trainer notes for the member.",
+          "maxLength": 500
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "UID of the admin who added the member.",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp when the member record was created.",
+          "maxLength": 40
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp when the member record was last updated.",
+          "maxLength": 40
+        }
+      },
+      "required": [
+        "fullName",
+        "phone",
+        "address",
+        "dateOfBirth",
+        "gender",
+        "membershipType",
+        "paidAmount",
+        "joiningDate",
+        "expiryDate"
+      ]
+    },
+    "AdminProfile": {
+      "title": "Admin Profile",
+      "description": "Represents an authorized gym administrator or staff profile.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "User ID of the administrator.",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "description": "Email address of the administrator.",
+          "maxLength": 120
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the administrator.",
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "description": "Role level of the staff member.",
+          "enum": ["superadmin", "admin", "trainer"]
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp.",
+          "maxLength": 40
+        }
+      },
+      "required": ["uid", "email"]
+    },
+    "GymSettings": {
+      "title": "Gym Settings",
+      "description": "Represents gym configurations such as membership plans and pricing.",
+      "type": "object",
+      "properties": {
+        "updatedAt": {
+          "type": "string",
+          "description": "Last updated timestamp.",
+          "maxLength": 40
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID of admin who updated settings.",
+          "maxLength": 128
+        }
+      }
+    }
+  },
+  "firestore": {
+    "/members/{memberId}": {
+      "schema": "Member",
+      "description": "Collection of all gym member records managed by DM FITNESS."
+    },
+    "/settings/{settingId}": {
+      "schema": "GymSettings",
+      "description": "Gym settings including membership plans and custom pricing."
+    },
+    "/admins/{adminId}": {
+      "schema": "AdminProfile",
+      "description": "Collection of authorized administrators and staff."
+    }
+  }
+}

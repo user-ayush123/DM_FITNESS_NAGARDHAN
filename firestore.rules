@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'lanjewarayush20@gmail.com'
+      );
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isValidMember(data) {
+      return data.keys().hasAll(['fullName', 'phone', 'address', 'dateOfBirth', 'gender', 'membershipType', 'paidAmount', 'joiningDate', 'expiryDate'])
+        && data.keys().hasOnly(['id', 'fullName', 'email', 'phone', 'address', 'dateOfBirth', 'gender', 'membershipType', 'totalFee', 'paidAmount', 'balanceDue', 'joiningDate', 'expiryDate', 'status', 'emergencyContact', 'notes', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 100
+        && (!('email' in data) || (data.email is string && data.email.size() <= 120))
+        && data.phone is string && data.phone.size() >= 5 && data.phone.size() <= 25
+        && data.address is string && data.address.size() >= 2 && data.address.size() <= 250
+        && data.dateOfBirth is string && data.dateOfBirth.size() <= 15
+        && data.gender in ['Male', 'Female', 'Other', 'Prefer not to say']
+        && data.membershipType is string && data.membershipType.size() >= 1 && data.membershipType.size() <= 100
+        && (!('totalFee' in data) || (data.totalFee is number && data.totalFee >= 0))
+        && data.paidAmount is number && data.paidAmount >= 0
+        && (!('balanceDue' in data) || (data.balanceDue is number && data.balanceDue >= 0))
+        && data.joiningDate is string && data.joiningDate.size() <= 15
+        && data.expiryDate is string && data.expiryDate.size() <= 15
+        && (!('status' in data) || data.status in ['active', 'expired'])
+        && (!('emergencyContact' in data) || (data.emergencyContact is string && data.emergencyContact.size() <= 120))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 500))
+        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 128))
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 40))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 40));
+    }
+
+    match /members/{memberId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn()
+        && isValidId(memberId)
+        && isValidMember(incoming())
+        && (!('createdBy' in incoming()) || incoming().createdBy == request.auth.uid || isAdmin());
+      allow update: if isSignedIn()
+        && isValidId(memberId)
+        && isValidMember(incoming());
+      allow delete: if isSignedIn() && isValidId(memberId);
+    }
+
+    match /settings/{settingId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isValidId(settingId);
+    }
+
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() && isValidId(adminId);
+    }
+  }
+}
